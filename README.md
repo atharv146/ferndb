@@ -4,6 +4,21 @@ A relational database built from scratch in TypeScript, with no runtime dependen
 
 **[Try it in your browser](https://atharv146.github.io/ferndb/)**: run SQL against a sample university database, read the executed plan for any query, and watch B+ tree pages split as you insert keys.
 
+![The FernDB playground: a SQL editor, a three-way join, and its results](docs/img/playground.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/plan.png" alt="Executed query plans: an index scan reads 136 rows in 0.4 ms while a full scan reads 12,794 rows in 5.9 ms"></td>
+    <td width="50%"><img src="docs/img/tree.png" alt="The enrollments table's B+ tree drawn from its real pages: one root, six internal pages and 355 leaves"></td>
+  </tr>
+  <tr>
+    <td>Executed plans with per-operator row counts and timings. Here the index scan beats the full scan.</td>
+    <td>A table's B+ tree, drawn from its real pages, with each leaf shaded by how full it is.</td>
+  </tr>
+</table>
+
+![The tree lab: inserting key 101 split a full leaf, and the changed pages are highlighted](docs/img/lab.png)
+
 ```
 $ node src/cli.ts shop.fern   # data from bench/readme-example.ts
 ferndb> EXPLAIN ANALYZE

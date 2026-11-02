@@ -496,6 +496,7 @@ renderSchema();
 save();
 
 // Deep links: #example=2&tab=plan&tree=students
+window.addEventListener('hashchange', () => location.reload());
 const params = new URLSearchParams(location.hash.slice(1));
 const exampleIndex = Number(params.get('example'));
 if (Number.isInteger(exampleIndex) && exampleIndex >= 1 && exampleIndex <= EXAMPLES.length) {
