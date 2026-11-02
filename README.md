@@ -135,6 +135,10 @@ bench/          benchmarks and the long-running fuzzer
 
 There is a single writer and no concurrent connections. Numbers are JavaScript doubles. Joins run in `FROM` order, and there is no `ALTER TABLE`, views or window functions. [The architecture doc](docs/ARCHITECTURE.md#known-limitations) has the full list.
 
+## Contributing
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and ideas.
+
 ## License
 
 MIT
