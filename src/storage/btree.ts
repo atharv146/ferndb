@@ -11,6 +11,7 @@
  * - The root page id never changes: when the root splits its contents move to
  *   a fresh page, and when it shrinks to one child that child moves back up.
  *   The catalog can therefore store root ids without ever updating them.
+ * - Sequential appends split off only the new key, keeping pages full.
  * - Deletes merge an underfull node into its sibling when the two fit in one
  *   page (no redistribution).
  * - Cursors are re-seekable: if the tree changes while a scan is suspended,
@@ -318,7 +319,8 @@ export class BTree {
         m.keys.splice(i, 0, key);
         m.vals.splice(i, 0, payload);
       }
-      return { inserted: !exists, split: nodeSize(m) > this.pageSize ? this.splitLeaf(m) : null };
+      const appended = !exists && m.next === 0 && i === m.keys.length - 1;
+      return { inserted: !exists, split: nodeSize(m) > this.pageSize ? this.splitLeaf(m, appended) : null };
     }
     const ci = upperBound(node.keys, key);
     const r = this.insertRec(node.children[ci]!, key, value, upsert);
@@ -338,9 +340,15 @@ export class BTree {
     return Math.min(max, Math.max(min, s));
   }
 
-  private splitLeaf(m: LeafNode): Split {
+  /**
+   * Splits an overfull leaf. When the new key was appended to the rightmost
+   * leaf (sequential inserts, e.g. auto-increment ids) the old page is left
+   * full and only the new key moves right, so bulk loads produce ~100% full
+   * pages instead of half-empty ones.
+   */
+  private splitLeaf(m: LeafNode, appended: boolean): Split {
     const sizes = m.keys.map((k, i) => leafCellSize(k, m.vals[i]!));
-    const s = this.splitPoint(sizes, 1, m.keys.length - 1);
+    const s = appended ? m.keys.length - 1 : this.splitPoint(sizes, 1, m.keys.length - 1);
     const rightId = this.pager.allocate();
     const right: LeafNode = { kind: 'leaf', keys: m.keys.splice(s), vals: m.vals.splice(s), next: m.next };
     m.next = rightId;

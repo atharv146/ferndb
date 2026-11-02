@@ -90,7 +90,6 @@ export class Database {
   private catalog: Catalog;
   private explicitTxn = false;
   private execCounter = 0;
-  private readonly nextKey = new Map<string, number>();
   private readonly parseCache = new Map<string, Statement[]>();
   private closed = false;
 
@@ -211,6 +210,41 @@ export class Database {
       });
   }
 
+  /**
+   * Verifies every B+ tree's structure and that each index matches its table
+   * exactly. Returns a list of problems (empty means healthy).
+   */
+  checkIntegrity(): string[] {
+    const problems: string[] = [];
+    const attempt = (what: string, fn: () => void) => {
+      try {
+        fn();
+      } catch (e) {
+        problems.push(`${what}: ${(e as Error).message}`);
+      }
+    };
+    attempt('schema', () => this.tree(this.pager.header().schemaRoot).check());
+    for (const t of this.catalog.tables.values()) {
+      let rows: Row[] = [];
+      attempt(`table ${t.name}`, () => {
+        this.tree(t.root).check();
+        rows = [...this.scanAll(t)];
+      });
+      for (const idx of this.catalog.indexesOf(t.name)) {
+        attempt(`index ${idx.name}`, () => {
+          const info = this.tree(idx.root).check();
+          if (info.entries !== rows.length) throw new Error(`has ${info.entries} entries but the table has ${rows.length} rows`);
+          const tree = this.tree(idx.root);
+          for (const row of rows) {
+            const tkey = tableKey(t, row);
+            if (!tree.has(indexKey(idx, row, tkey))) throw new Error(`missing entry for row ${JSON.stringify(row)}`);
+          }
+        });
+      }
+    }
+    return problems;
+  }
+
   /** The B+ tree of a table or index, level by level, with decoded keys. */
   inspectTree(name: string, maxNodes = 4000): TreeView {
     const t = this.catalog.findTable(name);
@@ -257,7 +291,6 @@ export class Database {
   private abort(): void {
     this.pager.rollback();
     this.explicitTxn = false;
-    this.nextKey.clear();
     this.catalog = new Catalog(this.pager, this.pager.header().schemaRoot);
   }
 
@@ -413,7 +446,6 @@ export class Database {
     }
     this.tree(t.root).destroy();
     this.catalog.removeTable(t.name);
-    this.nextKey.delete(t.name.toLowerCase());
     return emptyResult('DROP TABLE');
   }
 
@@ -482,22 +514,16 @@ export class Database {
     });
   }
 
-  /** Next value for a rowid or an INTEGER PRIMARY KEY left NULL: one more than the current maximum. */
+  /**
+   * Next value for a rowid or an INTEGER PRIMARY KEY left NULL: one more than
+   * the current largest key (read from the rightmost leaf, so it is O(log n)
+   * and can never go stale after deletes or rollbacks).
+   */
   private allocateKey(t: TableInfo): number {
-    const name = t.name.toLowerCase();
-    let next = this.nextKey.get(name);
-    if (next === undefined) {
-      const last = this.tree(t.root).last();
-      next = last ? (decodeKey(last)[0] as number) + 1 : 1;
-    }
-    this.nextKey.set(name, next + 1);
-    return next;
-  }
-
-  private noteKey(t: TableInfo, key: Value): void {
-    const name = t.name.toLowerCase();
-    const next = this.nextKey.get(name);
-    if (next !== undefined && typeof key === 'number' && key >= next) this.nextKey.set(name, Math.floor(key) + 1);
+    const last = this.tree(t.root).last();
+    if (!last) return 1;
+    const max = decodeKey(last)[0];
+    return typeof max === 'number' ? Math.floor(max) + 1 : 1;
   }
 
   private isAutoKey(t: TableInfo): boolean {
@@ -524,7 +550,6 @@ export class Database {
     const full = hasRowid(t) ? [...row, this.allocateKey(t)] : row;
     if (!hasRowid(t)) {
       if (this.isAutoKey(t) && full[t.pk[0]!] === null) full[t.pk[0]!] = this.allocateKey(t);
-      else if (this.isAutoKey(t)) this.noteKey(t, full[t.pk[0]!]!);
     }
     this.checkNotNull(t, full);
     const key = tableKey(t, full);
@@ -604,7 +629,6 @@ export class Database {
       if (keyChanged) {
         tree.delete(oldKey);
         if (!tree.insert(newKey, encodeRow(next.slice(0, width)))) throw this.uniqueViolation(t, t.pk);
-        if (this.isAutoKey(t)) this.noteKey(t, next[t.pk[0]!]!);
       } else {
         tree.insert(oldKey, encodeRow(next.slice(0, width)), true);
       }
