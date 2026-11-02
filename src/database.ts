@@ -151,12 +151,16 @@ export class Database {
 
   // ------------------------------------------------------------- public API
 
-  /** Runs every statement in `sql` and returns one result per statement. */
-  exec(sql: string, params: readonly Value[] = NO_PARAMS): QueryResult[] {
+  /**
+   * Runs every statement in `sql` and returns one result per statement.
+   * With `plans: true`, SELECT results also carry their executed plan with
+   * actual row counts and timings (like EXPLAIN ANALYZE, without a second run).
+   */
+  exec(sql: string, params: readonly Value[] = NO_PARAMS, opts: { plans?: boolean } = {}): QueryResult[] {
     this.assertOpen();
     return this.parse(sql).map((stmt) => {
       const t0 = performance.now();
-      const result = this.run(stmt, params);
+      const result = stmt.kind === 'select' && opts.plans ? this.select(stmt, params, true) : this.run(stmt, params);
       result.timeMs = performance.now() - t0;
       return result;
     });
@@ -354,10 +358,12 @@ export class Database {
     return new Planner(this.ctx).planSelect(stmt, null);
   }
 
-  private select(stmt: SelectStmt, params: readonly Value[]): QueryResult {
+  private select(stmt: SelectStmt, params: readonly Value[], withPlan = false): QueryResult {
     const p = this.planSelect(stmt);
-    const rows = [...p.plan.rows(this.env(params))];
-    return { command: 'SELECT', columns: p.columns, rows, changes: 0, timeMs: 0 };
+    const rows = [...p.plan.rows(this.env(params, withPlan))];
+    const result: QueryResult = { command: 'SELECT', columns: p.columns, rows, changes: 0, timeMs: 0 };
+    if (withPlan) result.plan = planToJson(p.plan, true);
+    return result;
   }
 
   private explain(stmt: Statement, analyze: boolean, params: readonly Value[]): QueryResult {

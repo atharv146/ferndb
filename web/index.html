@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FernDB Playground</title>
+    <meta name="description" content="A relational database built from scratch in TypeScript, running in your browser: SQL parser, cost-based planner, B+ trees and a write-ahead log." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 30V4M16 9l-7-4M16 9l7-4M16 15l-9-4M16 15l9-4M16 21l-8-3M16 21l8-3' stroke='%232E7656' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <h1 class="wordmark">FernDB</h1>
+        <p class="lede">A relational database written from scratch in TypeScript, running in this tab. Every query goes through its own parser, planner, B+ trees and write-ahead log.</p>
+      </div>
+      <nav class="top-links">
+        <a href="https://github.com/atharv146/ferndb">Source on GitHub</a>
+        <a href="https://github.com/atharv146/ferndb/blob/main/docs/ARCHITECTURE.md">How it works</a>
+      </nav>
+    </header>
+
+    <main class="shell">
+      <aside class="rail" aria-label="Schema">
+        <div class="rail-head">
+          <h2>Tables</h2>
+          <button type="button" class="quiet" id="reset">Reset data</button>
+        </div>
+        <div id="schema"></div>
+        <p class="rail-note" id="persist-note"></p>
+      </aside>
+
+      <section class="work">
+        <div class="examples" id="examples" role="list"></div>
+        <div class="editor-wrap">
+          <div id="editor"></div>
+          <div class="run-bar">
+            <button type="button" class="run" id="run">Run <kbd id="run-kbd">⌘ Enter</kbd></button>
+            <span class="status" id="status" role="status"></span>
+          </div>
+        </div>
+
+        <div class="tabs" role="tablist">
+          <button role="tab" type="button" data-tab="results" aria-selected="true">Results</button>
+          <button role="tab" type="button" data-tab="plan" aria-selected="false">Query plan</button>
+          <button role="tab" type="button" data-tab="tree" aria-selected="false">B+ tree</button>
+          <button role="tab" type="button" data-tab="storage" aria-selected="false">Storage</button>
+        </div>
+        <div class="panes">
+          <div class="pane" data-pane="results" id="results"></div>
+          <div class="pane" data-pane="plan" id="plan" hidden></div>
+          <div class="pane" data-pane="tree" id="tree" hidden></div>
+          <div class="pane" data-pane="storage" id="storage" hidden></div>
+        </div>
+      </section>
+    </main>
+    <div class="tooltip" id="tooltip" hidden></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
