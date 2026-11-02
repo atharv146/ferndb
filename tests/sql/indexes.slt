@@ -1,0 +1,198 @@
+# Index selection and index scans (small pages force multi-level trees)
+
+statement ok
+CREATE TABLE n (id INTEGER PRIMARY KEY, v INTEGER, tag TEXT, flag BOOLEAN)
+
+statement ok
+INSERT INTO n SELECT 1, 1, 'a', true
+
+statement ok
+INSERT INTO n (v, tag, flag) VALUES (5, 'b', false), (3, 'c', true), (NULL, 'd', NULL), (9, 'e', false), (3, 'f', true), (7, NULL, true), (1, 'h', false)
+
+statement ok
+CREATE INDEX n_v ON n (v)
+
+statement ok
+CREATE INDEX n_tag_v ON n (tag, v)
+
+plan Index Scan on n using n_v
+SELECT id FROM n WHERE v = 3
+
+query rowsort
+SELECT id FROM n WHERE v = 3
+----
+3
+6
+
+plan Index Scan on n using n_v
+SELECT id FROM n WHERE v > 4
+
+query rowsort
+SELECT id FROM n WHERE v > 4
+----
+2
+5
+7
+
+# an upper bound alone must not return NULLs (they sort first in the index)
+query rowsort
+SELECT id FROM n WHERE v < 3
+----
+1
+8
+
+query rowsort
+SELECT id FROM n WHERE v <= 3
+----
+1
+3
+6
+8
+
+query rowsort
+SELECT id FROM n WHERE v BETWEEN 3 AND 7
+----
+2
+3
+6
+7
+
+query rowsort
+SELECT id FROM n WHERE 3 < v AND v < 9
+----
+2
+7
+
+query rowsort
+SELECT id FROM n WHERE v IN (9, 1, 1, NULL, 42)
+----
+1
+5
+8
+
+query
+SELECT id FROM n WHERE v = NULL
+----
+
+plan PK Lookup on n
+SELECT * FROM n WHERE id = 4
+
+plan PK Range Scan on n
+SELECT * FROM n WHERE id >= 4 AND id < 6
+
+query
+SELECT id FROM n WHERE id >= 4 AND id < 6
+----
+4
+5
+
+# composite index: equality on the first column, range on the second
+plan Index Scan on n using n_tag_v
+SELECT id FROM n WHERE tag = 'c' AND v >= 3
+
+query
+SELECT id FROM n WHERE tag = 'c' AND v >= 3
+----
+3
+
+# ORDER BY the primary key needs no sort, even descending
+plan Seq Scan on n (reverse)
+SELECT id FROM n ORDER BY id DESC
+
+query
+SELECT id FROM n ORDER BY id DESC LIMIT 3
+----
+8
+7
+6
+
+# ORDER BY an indexed column with LIMIT walks the index instead of sorting
+plan Index Scan on n using n_v
+SELECT id, v FROM n ORDER BY v LIMIT 3
+
+query
+SELECT id, v FROM n ORDER BY v LIMIT 3
+----
+4 | NULL
+1 | 1
+8 | 1
+
+query
+SELECT id, v FROM n ORDER BY v DESC LIMIT 2
+----
+5 | 9
+7 | 7
+
+# without LIMIT a full sort is cheaper than random lookups
+plan Sort
+SELECT id FROM n ORDER BY v
+
+plan Index Scan on n using n_tag_v (reverse)
+SELECT id FROM n ORDER BY tag DESC LIMIT 2
+
+plan Top-N Sort
+SELECT id FROM n ORDER BY v, id LIMIT 2
+
+query
+SELECT id FROM n ORDER BY v, id LIMIT 2
+----
+4
+1
+
+query
+SELECT id FROM n ORDER BY tag DESC LIMIT 2
+----
+8
+6
+
+# indexes stay correct through updates and deletes
+statement ok
+UPDATE n SET v = v + 100 WHERE v >= 5
+
+query rowsort
+SELECT id FROM n WHERE v > 100
+----
+2
+5
+7
+
+query
+SELECT id FROM n WHERE v = 5
+----
+
+statement ok
+DELETE FROM n WHERE tag = 'c'
+
+query rowsort
+SELECT id FROM n WHERE v = 3
+----
+6
+
+statement ok
+UPDATE n SET id = id + 100 WHERE id = 6
+
+query
+SELECT id, tag FROM n WHERE v = 3
+----
+106 | f
+
+# a unique index built over existing duplicates fails and leaves nothing behind
+statement error UNIQUE constraint failed: n.flag
+CREATE UNIQUE INDEX n_flag ON n (flag)
+
+statement error no such index
+DROP INDEX n_flag
+
+statement ok
+DROP INDEX n_v
+
+plan Seq Scan on n
+SELECT id FROM n WHERE v = 3
+
+query
+SELECT id FROM n WHERE v = 3
+----
+106
+
+statement error cannot compare INTEGER with TEXT
+SELECT * FROM n WHERE id = 'x'

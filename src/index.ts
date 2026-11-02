@@ -1,0 +1,10 @@
+export { Database, tableSql } from './database.ts';
+export type { DatabaseOptions, QueryResult, TableSummary, TreeView } from './database.ts';
+export { DbError, formatValue } from './types.ts';
+export type { ColumnType, Value } from './types.ts';
+export { MemoryFile } from './storage/file.ts';
+export type { BlockFile } from './storage/file.ts';
+export type { PagerStats } from './storage/pager.ts';
+export type { PlanJson } from './exec/operators.ts';
+export { explainLines } from './exec/operators.ts';
+export { parse } from './sql/parser.ts';

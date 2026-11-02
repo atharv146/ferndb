@@ -1,0 +1,151 @@
+# Types, keys, defaults and constraints
+
+statement ok
+CREATE TABLE u (id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT NOT NULL, score REAL DEFAULT 1.5, active BOOLEAN DEFAULT true)
+
+# an INTEGER PRIMARY KEY left out (or NULL) is assigned max + 1
+statement ok
+INSERT INTO u (email, name) VALUES ('a@x', 'a')
+
+statement ok
+INSERT INTO u (id, email, name) VALUES (10, 'b@x', 'b')
+
+statement ok
+INSERT INTO u (id, email, name, score) VALUES (NULL, 'c@x', 'c', 3)
+
+query
+SELECT id, email, name, score, active FROM u
+----
+1 | a@x | a | 1.5 | true
+10 | b@x | b | 1.5 | true
+11 | c@x | c | 3 | true
+
+statement error UNIQUE constraint failed: u.id
+INSERT INTO u (id, email, name) VALUES (10, 'z@x', 'z')
+
+statement error UNIQUE constraint failed: u.email
+INSERT INTO u (email, name) VALUES ('a@x', 'dup')
+
+# NULLs never conflict with each other in a UNIQUE column
+statement ok
+INSERT INTO u (email, name) VALUES (NULL, 'n1'), (NULL, 'n2')
+
+statement error NOT NULL constraint failed: u.name
+INSERT INTO u (email) VALUES ('q@x')
+
+statement error column u.name is TEXT, but 5 is INTEGER
+INSERT INTO u (name) VALUES (5)
+
+statement error column u.score is REAL, but 'high' is TEXT
+INSERT INTO u (name, score) VALUES ('x', 'high')
+
+statement error column u.id is INTEGER, but 1.5 is REAL
+INSERT INTO u (id, name) VALUES (1.5, 'x')
+
+statement error INSERT has 2 values but 1 columns
+INSERT INTO u (name) VALUES ('x', 'y')
+
+statement error no column named nope
+INSERT INTO u (nope) VALUES (1)
+
+# a failed multi-row insert leaves nothing behind
+statement error UNIQUE constraint failed
+INSERT INTO u (email, name) VALUES ('new@x', 'new'), ('a@x', 'dup')
+
+query
+SELECT count(*) FROM u WHERE email = 'new@x'
+----
+0
+
+query
+SELECT count(*) FROM u
+----
+5
+
+# composite primary key
+statement ok
+CREATE TABLE pairs (a INTEGER, b TEXT, v INTEGER, PRIMARY KEY (a, b))
+
+statement ok
+INSERT INTO pairs VALUES (1, 'x', 1), (1, 'y', 2), (2, 'x', 3)
+
+statement error UNIQUE constraint failed: pairs.a, pairs.b
+INSERT INTO pairs VALUES (1, 'y', 9)
+
+statement error NOT NULL constraint failed: pairs.b
+INSERT INTO pairs VALUES (3, NULL, 1)
+
+plan PK Range Scan
+SELECT v FROM pairs WHERE a = 1
+
+query
+SELECT v FROM pairs WHERE a = 1 ORDER BY b DESC
+----
+2
+1
+
+# tables without a primary key get a hidden rowid
+statement ok
+CREATE TABLE log (msg TEXT)
+
+statement ok
+INSERT INTO log VALUES ('first'), ('second'), ('first')
+
+query
+SELECT rowid, msg FROM log
+----
+1 | first
+2 | second
+3 | first
+
+query
+SELECT * FROM log WHERE rowid = 2
+----
+second
+
+statement ok
+CREATE TABLE multi (a INTEGER, b INTEGER, UNIQUE (a, b))
+
+statement ok
+INSERT INTO multi VALUES (1, 1), (1, 2), (NULL, 1), (NULL, 1)
+
+statement error UNIQUE constraint failed: multi.a, multi.b
+INSERT INTO multi VALUES (1, 2)
+
+statement error already exists
+CREATE TABLE u (x INTEGER)
+
+statement ok
+CREATE TABLE IF NOT EXISTS u (x INTEGER)
+
+statement error duplicate column name
+CREATE TABLE bad (a INTEGER, A TEXT)
+
+statement error only one column can be declared PRIMARY KEY
+CREATE TABLE bad (a INTEGER PRIMARY KEY, b INTEGER PRIMARY KEY)
+
+statement error a column type
+CREATE TABLE bad (a BLOB)
+
+statement error cannot be dropped
+DROP INDEX u_email_key
+
+statement ok
+DROP TABLE u
+
+statement error no such table: u
+SELECT * FROM u
+
+statement ok
+DROP TABLE IF EXISTS u
+
+statement ok
+CREATE TABLE neg (x INTEGER DEFAULT -1, y TEXT DEFAULT 'none')
+
+statement ok
+INSERT INTO neg (y) VALUES ('given')
+
+query
+SELECT x, y FROM neg
+----
+-1 | given

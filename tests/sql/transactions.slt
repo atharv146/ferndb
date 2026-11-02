@@ -1,0 +1,107 @@
+# Transactions
+
+statement ok
+CREATE TABLE acct (id INTEGER PRIMARY KEY, owner TEXT, balance INTEGER)
+
+statement ok
+INSERT INTO acct VALUES (1, 'alice', 100), (2, 'bob', 50)
+
+statement ok
+BEGIN
+
+statement ok
+UPDATE acct SET balance = balance - 30 WHERE id = 1
+
+statement ok
+UPDATE acct SET balance = balance + 30 WHERE id = 2
+
+statement ok
+COMMIT
+
+query
+SELECT owner, balance FROM acct
+----
+alice | 70
+bob | 80
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM acct
+
+statement ok
+INSERT INTO acct VALUES (3, 'carol', 1)
+
+query
+SELECT count(*) FROM acct
+----
+1
+
+statement ok
+ROLLBACK
+
+query
+SELECT owner FROM acct
+----
+alice
+bob
+
+# DDL is transactional too
+statement ok
+BEGIN
+
+statement ok
+CREATE TABLE tmp (x INTEGER)
+
+statement ok
+CREATE INDEX acct_owner ON acct (owner)
+
+statement ok
+DROP TABLE acct
+
+statement ok
+ROLLBACK
+
+statement error no such table: tmp
+SELECT * FROM tmp
+
+query
+SELECT owner FROM acct WHERE id = 2
+----
+bob
+
+statement ok
+DROP INDEX IF EXISTS acct_owner
+
+# an error inside a transaction rolls the whole transaction back
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO acct VALUES (5, 'eve', 5)
+
+statement error the transaction has been rolled back
+INSERT INTO acct VALUES (1, 'dup', 0)
+
+statement error no transaction is active
+COMMIT
+
+query
+SELECT count(*) FROM acct
+----
+2
+
+statement error a transaction is already active
+BEGIN; BEGIN
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN TRANSACTION; INSERT INTO acct VALUES (6, 'fay', 6); END TRANSACTION
+
+query
+SELECT owner FROM acct WHERE id = 6
+----
+fay

@@ -1,0 +1,113 @@
+# INSERT ... SELECT, UPDATE and DELETE
+
+statement ok
+CREATE TABLE src (id INTEGER PRIMARY KEY, n INTEGER)
+
+statement ok
+INSERT INTO src VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE TABLE dst (id INTEGER PRIMARY KEY, n INTEGER)
+
+statement ok
+INSERT INTO dst SELECT id, n * 2 FROM src WHERE n > 10
+
+query
+SELECT * FROM dst
+----
+2 | 40
+3 | 60
+
+# INSERT ... SELECT from the same table reads a snapshot first (no infinite loop)
+statement ok
+INSERT INTO src (n) SELECT n + 1 FROM src
+
+query
+SELECT count(*), max(id), sum(n) FROM src
+----
+6 | 6 | 123
+
+# every SET expression sees the old row
+statement ok
+CREATE TABLE sw (a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO sw VALUES (1, 2)
+
+statement ok
+UPDATE sw SET a = b, b = a
+
+query
+SELECT a, b FROM sw
+----
+2 | 1
+
+# primary key updates move the row
+statement ok
+UPDATE src SET id = id * 10 WHERE id <= 2
+
+query
+SELECT id FROM src ORDER BY id
+----
+3
+4
+5
+6
+10
+20
+
+statement error UNIQUE constraint failed: src.id
+UPDATE src SET id = 4 WHERE id = 3
+
+statement error cannot update rowid
+UPDATE sw SET rowid = 5
+
+statement error column assigned more than once
+UPDATE sw SET a = 1, a = 2
+
+statement ok
+DELETE FROM src WHERE n > 20 AND id < 10
+
+query
+SELECT id, n FROM src ORDER BY id
+----
+4 | 11
+10 | 10
+20 | 20
+
+statement ok
+DELETE FROM src
+
+query
+SELECT count(*) FROM src
+----
+0
+
+# lots of rows in a tiny-page tree, then delete most of them
+statement ok
+CREATE TABLE big (id INTEGER PRIMARY KEY, s TEXT)
+
+statement ok
+INSERT INTO big (s) SELECT 'row-' || a.n FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10) a, (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10) b, (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10) c
+
+query
+SELECT count(*), min(id), max(id) FROM big
+----
+1000 | 1 | 1000
+
+statement ok
+DELETE FROM big WHERE id % 10 <> 0
+
+query
+SELECT count(*), sum(id) FROM big
+----
+100 | 50500
+
+# long text values spill into overflow pages
+statement ok
+INSERT INTO big (id, s) VALUES (5000, 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
+
+query
+SELECT length(s) FROM big WHERE id = 5000
+----
+568

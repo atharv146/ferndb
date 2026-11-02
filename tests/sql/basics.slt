@@ -1,0 +1,197 @@
+# Basic SELECT behaviour, expressions and NULL semantics
+
+query
+SELECT 1 + 2 * 3, 'a' || 'b', 7 / 2, 7 % 3, -(4)
+----
+7 | ab | 3.5 | 1 | -4
+
+statement ok
+CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT, c REAL, d BOOLEAN)
+
+statement ok
+INSERT INTO t VALUES (1, 'one', 1.5, true), (2, 'two', NULL, false), (3, NULL, 3.25, NULL), (4, 'four', -1, true)
+
+query
+SELECT * FROM t
+----
+1 | one | 1.5 | true
+2 | two | NULL | false
+3 | NULL | 3.25 | NULL
+4 | four | -1 | true
+
+query
+SELECT a, b FROM t WHERE c > 0
+----
+1 | one
+3 | NULL
+
+query
+SELECT a FROM t WHERE b IS NULL OR c IS NULL
+----
+2
+3
+
+query
+SELECT a FROM t WHERE d
+----
+1
+4
+
+query
+SELECT a FROM t WHERE NOT d
+----
+2
+
+# NULL comparisons are unknown, never true or false
+query
+SELECT a FROM t WHERE c = NULL OR c <> NULL
+----
+
+query
+SELECT NULL = NULL, NULL AND false, NULL OR true, NULL AND true, NOT NULL
+----
+NULL | false | true | NULL | NULL
+
+query
+SELECT a FROM t ORDER BY b
+----
+3
+4
+1
+2
+
+query
+SELECT a FROM t ORDER BY b DESC
+----
+2
+1
+4
+3
+
+query
+SELECT a FROM t ORDER BY c DESC LIMIT 2
+----
+3
+1
+
+query
+SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 1
+----
+2
+3
+
+query
+SELECT a FROM t ORDER BY a DESC LIMIT 1, 2
+----
+3
+2
+
+query
+SELECT a * 10 AS x FROM t WHERE a BETWEEN 2 AND 3 ORDER BY x DESC
+----
+30
+20
+
+query
+SELECT a FROM t WHERE a NOT BETWEEN 2 AND 3
+----
+1
+4
+
+query
+SELECT a FROM t WHERE b IN ('one', 'four', 'zzz')
+----
+1
+4
+
+query
+SELECT a FROM t WHERE b NOT IN ('one', NULL)
+----
+
+query
+SELECT a FROM t WHERE b LIKE '%o' OR b LIKE 't_o'
+----
+2
+
+query
+SELECT a FROM t WHERE b ILIKE 'ON%'
+----
+1
+
+query
+SELECT b, CASE WHEN c > 2 THEN 'big' WHEN c > 0 THEN 'small' ELSE 'other' END FROM t
+----
+one | small
+two | other
+NULL | big
+four | other
+
+query
+SELECT CASE a WHEN 1 THEN 'x' WHEN 2 THEN 'y' END FROM t
+----
+x
+y
+NULL
+NULL
+
+query
+SELECT upper(b), length(b), substr(b, 2, 2), coalesce(b, '?') FROM t WHERE a < 4
+----
+ONE | 3 | ne | one
+TWO | 3 | wo | two
+NULL | NULL | NULL | ?
+
+query
+SELECT abs(-3), round(2.567, 2), floor(1.9), ceil(1.1), nullif(1, 1), greatest(3, 9, 2), least('b', 'a')
+----
+3 | 2.57 | 1 | 2 | NULL | 9 | a
+
+query
+SELECT CAST('42' AS INTEGER) + 1, CAST(3.9 AS INTEGER), CAST(5 AS TEXT) || '!', CAST('yes' AS BOOLEAN)
+----
+43 | 3 | 5! | true
+
+query
+SELECT DISTINCT d FROM t ORDER BY d
+----
+NULL
+false
+true
+
+query
+SELECT a, b AS label FROM t ORDER BY label LIMIT 1
+----
+3 | NULL
+
+query
+SELECT t.a, t.b FROM t WHERE t.a = 2
+----
+2 | two
+
+statement error division by zero
+SELECT 1 / 0
+
+statement error cannot compare INTEGER with TEXT
+SELECT a FROM t WHERE a = 'x'
+
+statement error no such column: zzz
+SELECT zzz FROM t
+
+statement error no such table: nope
+SELECT * FROM nope
+
+statement error no such function: frobnicate
+SELECT frobnicate(1)
+
+statement error found 't' at line 1, column 15
+SELECT a FORM t
+
+query
+SELECT 'it''s', "a" FROM t WHERE a = 1
+----
+it's | 1
+
+query
+SELECT 1e3, .5, 2.5e-1
+----
+1000 | 0.5 | 0.25

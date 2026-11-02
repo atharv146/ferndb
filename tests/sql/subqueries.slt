@@ -1,0 +1,137 @@
+# Subqueries, derived tables and set operations
+
+statement ok
+CREATE TABLE c (id INTEGER PRIMARY KEY, name TEXT, city TEXT)
+
+statement ok
+CREATE TABLE o (id INTEGER PRIMARY KEY, cid INTEGER, total INTEGER)
+
+statement ok
+INSERT INTO c VALUES (1, 'ann', 'sf'), (2, 'bo', 'nyc'), (3, 'cy', 'sf'), (4, 'di', 'la')
+
+statement ok
+INSERT INTO o VALUES (10, 1, 50), (11, 1, 70), (12, 2, 20), (13, 3, 500), (14, NULL, 5)
+
+query
+SELECT name FROM c WHERE id IN (SELECT cid FROM o) ORDER BY name
+----
+ann
+bo
+cy
+
+# NOT IN over a set containing NULL is never true
+query
+SELECT name FROM c WHERE id NOT IN (SELECT cid FROM o)
+----
+
+query
+SELECT name FROM c WHERE id NOT IN (SELECT cid FROM o WHERE cid IS NOT NULL)
+----
+di
+
+query
+SELECT name FROM c WHERE EXISTS (SELECT 1 FROM o WHERE o.cid = c.id AND o.total > 60) ORDER BY name
+----
+ann
+cy
+
+query
+SELECT name FROM c WHERE NOT EXISTS (SELECT 1 FROM o WHERE o.cid = c.id)
+----
+di
+
+# correlated scalar subquery
+query
+SELECT name, (SELECT sum(total) FROM o WHERE o.cid = c.id) FROM c ORDER BY id
+----
+ann | 120
+bo | 20
+cy | 500
+di | NULL
+
+query
+SELECT name FROM c WHERE (SELECT count(*) FROM o WHERE o.cid = c.id) = 2
+----
+ann
+
+query
+SELECT (SELECT max(total) FROM o), (SELECT name FROM c WHERE id = 3)
+----
+500 | cy
+
+statement error scalar subquery returned more than one row
+SELECT (SELECT id FROM c)
+
+statement error subquery must return exactly 1 column
+SELECT name FROM c WHERE id IN (SELECT id, name FROM c)
+
+# derived tables
+query
+SELECT city, n FROM (SELECT city, count(*) AS n FROM c GROUP BY city) t WHERE n > 1
+----
+sf | 2
+
+query
+SELECT t.name, t.spent FROM (SELECT c.name, sum(o.total) AS spent FROM c JOIN o ON o.cid = c.id GROUP BY c.name) t ORDER BY t.spent DESC LIMIT 2
+----
+cy | 500
+ann | 120
+
+query
+SELECT x.name FROM c x JOIN (SELECT cid FROM o WHERE total >= 50) big ON big.cid = x.id ORDER BY 1
+----
+ann
+ann
+cy
+
+# correlation two levels deep
+query
+SELECT name FROM c WHERE EXISTS (SELECT 1 FROM o WHERE o.cid = c.id AND o.total = (SELECT max(o2.total) FROM o o2 WHERE o2.cid = c.id) AND o.total > 60)
+----
+ann
+cy
+
+# set operations
+query
+SELECT city FROM c UNION SELECT 'tokyo' ORDER BY 1
+----
+la
+nyc
+sf
+tokyo
+
+query
+SELECT city FROM c UNION ALL SELECT city FROM c WHERE id < 3 ORDER BY 1
+----
+la
+nyc
+nyc
+sf
+sf
+sf
+
+query
+SELECT cid FROM o INTERSECT SELECT id FROM c ORDER BY 1
+----
+1
+2
+3
+
+query
+SELECT id FROM c EXCEPT SELECT cid FROM o
+----
+4
+
+query
+SELECT name FROM c WHERE city = 'sf' UNION SELECT name FROM c WHERE id > 3 ORDER BY name DESC LIMIT 2
+----
+di
+cy
+
+statement error same number of columns
+SELECT id FROM c UNION SELECT id, name FROM c
+
+query
+SELECT name FROM c WHERE id = (SELECT cid FROM o ORDER BY total DESC LIMIT 1)
+----
+cy

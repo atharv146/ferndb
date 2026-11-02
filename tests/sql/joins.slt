@@ -1,0 +1,165 @@
+# Joins: every algorithm should give the same answers
+
+statement ok
+CREATE TABLE dept (id INTEGER PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE emp (id INTEGER PRIMARY KEY, name TEXT, dept_id INTEGER, boss INTEGER, salary INTEGER)
+
+statement ok
+INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty')
+
+statement ok
+INSERT INTO emp VALUES (1, 'ann', 1, NULL, 200), (2, 'bob', 1, 1, 150), (3, 'cat', 2, 1, 120), (4, 'dan', NULL, 3, 90), (5, 'eve', 2, 3, 130)
+
+# emp -> dept probes dept by primary key: index nested loop join
+plan Index Nested Loop Join
+SELECT e.name, d.name FROM emp e JOIN dept d ON d.id = e.dept_id
+
+query rowsort
+SELECT e.name, d.name FROM emp e JOIN dept d ON d.id = e.dept_id
+----
+ann | eng
+bob | eng
+cat | ops
+eve | ops
+
+# dept -> emp has no index on emp.dept_id: hash join
+plan Hash Join
+SELECT d.name, e.name FROM dept d JOIN emp e ON e.dept_id = d.id
+
+query rowsort
+SELECT d.name, e.name FROM dept d JOIN emp e ON e.dept_id = d.id
+----
+eng | ann
+eng | bob
+ops | cat
+ops | eve
+
+query rowsort
+SELECT d.name, e.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id
+----
+eng | ann
+eng | bob
+ops | cat
+ops | eve
+empty | NULL
+
+query rowsort
+SELECT e.name, d.name FROM emp e LEFT JOIN dept d ON d.id = e.dept_id
+----
+ann | eng
+bob | eng
+cat | ops
+dan | NULL
+eve | ops
+
+# ON filters on the right side keep unmatched left rows; WHERE filters remove them
+query rowsort
+SELECT d.name, e.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id AND e.salary > 140
+----
+eng | ann
+eng | bob
+ops | NULL
+empty | NULL
+
+query rowsort
+SELECT d.name, e.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id WHERE e.salary > 140
+----
+eng | ann
+eng | bob
+
+query rowsort
+SELECT d.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id WHERE e.id IS NULL
+----
+empty
+
+# non-equi join: nested loop
+plan Nested Loop Join
+SELECT a.name, b.name FROM emp a JOIN emp b ON a.salary > b.salary + 50
+
+query rowsort
+SELECT a.name, b.name FROM emp a JOIN emp b ON a.salary > b.salary + 50
+----
+ann | cat
+ann | dan
+ann | eve
+bob | dan
+
+# self join on boss
+query rowsort
+SELECT e.name, b.name FROM emp e JOIN emp b ON b.id = e.boss
+----
+bob | ann
+cat | ann
+dan | cat
+eve | cat
+
+query
+SELECT count(*) FROM dept CROSS JOIN emp
+----
+15
+
+query
+SELECT count(*) FROM dept, emp WHERE dept.id = emp.dept_id
+----
+4
+
+statement ok
+CREATE TABLE a (k INTEGER, x TEXT)
+
+statement ok
+CREATE TABLE b (k INTEGER, y TEXT)
+
+statement ok
+INSERT INTO a VALUES (1, 'a1'), (2, 'a2'), (NULL, 'anull'), (2, 'a2b')
+
+statement ok
+INSERT INTO b VALUES (2, 'b2'), (3, 'b3'), (NULL, 'bnull')
+
+# NULL keys never match
+query rowsort
+SELECT x, y FROM a JOIN b USING (k)
+----
+a2 | b2
+a2b | b2
+
+query rowsort
+SELECT x, y FROM a LEFT JOIN b ON a.k = b.k
+----
+a1 | NULL
+a2 | b2
+a2b | b2
+anull | NULL
+
+# three-way join with aggregation
+query rowsort
+SELECT d.name, count(*), max(b.name) FROM emp e JOIN dept d ON d.id = e.dept_id JOIN emp b ON b.id = e.boss GROUP BY d.name
+----
+eng | 1 | ann
+ops | 2 | cat
+
+statement ok
+CREATE INDEX emp_dept ON emp (dept_id)
+
+plan Index Nested Loop Left Join
+SELECT d.name, e.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id
+
+query rowsort
+SELECT d.name, e.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id AND e.salary > 140
+----
+eng | ann
+eng | bob
+ops | NULL
+empty | NULL
+
+statement error ambiguous
+SELECT name FROM emp JOIN dept ON dept.id = emp.dept_id
+
+statement error specified more than once
+SELECT * FROM emp JOIN emp ON 1 = 1
+
+query
+SELECT * FROM dept d JOIN dept e ON e.id = d.id WHERE d.id = 2
+----
+2 | ops | 2 | ops

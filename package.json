@@ -1,0 +1,50 @@
+{
+  "name": "ferndb",
+  "version": "0.1.0",
+  "description": "A relational database built from scratch in TypeScript: paged B+ trees, write-ahead logging, a SQL parser, and a cost-aware query planner.",
+  "type": "module",
+  "license": "MIT",
+  "author": "atharv146",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atharv146/ferndb.git"
+  },
+  "keywords": [
+    "database",
+    "sql",
+    "b-tree",
+    "wal",
+    "query-planner",
+    "storage-engine"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "ferndb": "src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts"
+  },
+  "scripts": {
+    "repl": "node src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "fuzz": "node bench/fuzz.ts",
+    "bench": "node bench/bench.ts",
+    "typecheck": "tsc --noEmit",
+    "dev": "vite web",
+    "build:web": "vite build web"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "fast-check": "^4.10.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/theme-one-dark": "^6.1.3",
+    "codemirror": "^6.0.2"
+  }
+}
