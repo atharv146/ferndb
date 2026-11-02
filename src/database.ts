@@ -91,6 +91,8 @@ export class Database {
   private explicitTxn = false;
   private execCounter = 0;
   private readonly parseCache = new Map<string, Statement[]>();
+  /** Row counts per table for the planner's estimates; filled lazily, dropped on rollback. */
+  private readonly rowCounts = new Map<string, number>();
   private closed = false;
 
   constructor(dbFile: BlockFile, walFile: BlockFile, opts: DatabaseOptions = {}) {
@@ -110,7 +112,23 @@ export class Database {
   }
 
   private get ctx(): PlannerContext {
-    return { catalog: this.catalog, tree: (root) => new BTree(this.pager, root) };
+    return { catalog: this.catalog, tree: (root) => new BTree(this.pager, root), rowCount: (t) => this.rowCount(t) };
+  }
+
+  private rowCount(t: TableInfo): number {
+    const key = t.name.toLowerCase();
+    let n = this.rowCounts.get(key);
+    if (n === undefined) {
+      n = this.tree(t.root).count();
+      this.rowCounts.set(key, n);
+    }
+    return n;
+  }
+
+  private adjustRowCount(t: TableInfo, delta: number): void {
+    const key = t.name.toLowerCase();
+    const n = this.rowCounts.get(key);
+    if (n !== undefined) this.rowCounts.set(key, n + delta);
   }
 
   private tree(root: number): BTree {
@@ -291,6 +309,7 @@ export class Database {
   private abort(): void {
     this.pager.rollback();
     this.explicitTxn = false;
+    this.rowCounts.clear();
     this.catalog = new Catalog(this.pager, this.pager.header().schemaRoot);
   }
 
@@ -446,6 +465,7 @@ export class Database {
     }
     this.tree(t.root).destroy();
     this.catalog.removeTable(t.name);
+    this.rowCounts.delete(t.name.toLowerCase());
     return emptyResult('DROP TABLE');
   }
 
@@ -555,6 +575,7 @@ export class Database {
     const key = tableKey(t, full);
     if (!this.tree(t.root).insert(key, encodeRow(full.slice(0, t.columns.length)))) throw this.uniqueViolation(t, t.pk);
     for (const idx of this.catalog.indexesOf(t.name)) this.addIndexEntry(t, idx, full, key);
+    this.adjustRowCount(t, 1);
   }
 
   private insert(stmt: Statement & { kind: 'insert' }, params: readonly Value[]): QueryResult {
@@ -650,6 +671,7 @@ export class Database {
       tree.delete(key);
       for (const idx of indexes) this.tree(idx.root).delete(indexKey(idx, row, key));
     }
+    this.adjustRowCount(t, -rows.length);
     return emptyResult('DELETE', rows.length);
   }
 }

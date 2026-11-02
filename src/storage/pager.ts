@@ -1,8 +1,10 @@
 /**
  * The pager owns every page of the database file. It provides:
  *
- *  - a buffer pool: an LRU cache of pages, kept in decoded form so the B+ tree
- *    can work with plain objects instead of re-parsing bytes on every access;
+ *  - a buffer pool of pages kept in decoded form, so the B+ tree works with
+ *    plain objects instead of re-parsing bytes on every access. Eviction uses
+ *    the CLOCK (second-chance) algorithm: a hit only sets a reference bit,
+ *    which is far cheaper than reordering an LRU list on every access;
  *  - transactions: a NO-STEAL policy, meaning dirty pages never leave memory
  *    before commit, so rollback is just dropping them from the cache;
  *  - durability through a write-ahead log (WAL): commit appends full page
@@ -33,6 +35,8 @@ interface Entry {
   obj: unknown;
   codec: PageCodec<unknown>;
   dirty: boolean;
+  /** CLOCK reference bit: set on every access, cleared as the hand passes. */
+  ref: boolean;
 }
 
 export interface PagerOptions {
@@ -137,7 +141,7 @@ export class Pager {
   private readonly cacheSize: number;
   private readonly checkpointFrames: number;
 
-  /** LRU order: Map iteration order is insertion order; touching re-inserts. */
+  /** Map iteration order is the clock order; the hand starts at the front. */
   private readonly cache = new Map<number, Entry>();
   private readonly dirty = new Set<number>();
   /** pageId -> byte offset of its newest committed image in the WAL. */
@@ -148,8 +152,13 @@ export class Pager {
   private walCrc = 0;
 
   private txn = false;
-  /** Bumped on every page modification; lets cursors detect concurrent changes. */
-  modCount = 0;
+  /**
+   * Per-tree change counters (keyed by root page) plus an epoch bumped on
+   * rollback. A suspended cursor compares these to know whether it must
+   * re-seek, without being disturbed by changes to unrelated trees.
+   */
+  private readonly treeVersions = new Map<number, number>();
+  private epoch = 0;
   readonly isNew: boolean;
 
   private stats = { cacheHits: 0, cacheMisses: 0, commits: 0, checkpoints: 0, framesWritten: 0 };
@@ -249,8 +258,7 @@ export class Pager {
   }
 
   private touch(e: Entry): void {
-    this.cache.delete(e.id);
-    this.cache.set(e.id, e);
+    e.ref = true;
   }
 
   private entry<T>(id: number, codec: PageCodec<T>): Entry {
@@ -267,17 +275,26 @@ export class Pager {
     }
     this.stats.cacheMisses++;
     const obj = codec.decode(this.loadBytes(id), this.pageSize);
-    const fresh: Entry = { id, obj, codec: codec as PageCodec<unknown>, dirty: false };
+    const fresh: Entry = { id, obj, codec: codec as PageCodec<unknown>, dirty: false, ref: true };
     this.cache.set(id, fresh);
     this.evict();
     return fresh;
   }
 
   private evict(): void {
-    if (this.cache.size <= this.cacheSize + this.dirty.size) return;
+    const limit = this.cacheSize + this.dirty.size;
+    if (this.cache.size <= limit) return;
+    // Sweep the clock: referenced pages get a second chance (bit cleared and
+    // moved behind the hand); unreferenced clean pages are evicted.
+    let steps = this.cache.size * 2;
     for (const [id, e] of this.cache) {
-      if (this.cache.size <= this.cacheSize + this.dirty.size) break;
-      if (!e.dirty && id !== 0) this.cache.delete(id);
+      if (this.cache.size <= limit || steps-- <= 0) break;
+      if (e.dirty || id === 0) continue;
+      this.cache.delete(id);
+      if (e.ref) {
+        e.ref = false;
+        this.cache.set(id, e);
+      }
     }
   }
 
@@ -297,7 +314,6 @@ export class Pager {
     const e = this.entry(id, codec);
     e.dirty = true;
     this.dirty.add(id);
-    this.modCount++;
     return e.obj as T;
   }
 
@@ -310,12 +326,19 @@ export class Pager {
       e.codec = codec as PageCodec<unknown>;
       this.touch(e);
     } else {
-      e = { id, obj, codec: codec as PageCodec<unknown>, dirty: true };
+      e = { id, obj, codec: codec as PageCodec<unknown>, dirty: true, ref: true };
       this.cache.set(id, e);
     }
     e.dirty = true;
     this.dirty.add(id);
-    this.modCount++;
+  }
+
+  treeVersion(root: number): number {
+    return this.epoch * 0x100000000 + (this.treeVersions.get(root) ?? 0);
+  }
+
+  bumpTree(root: number): void {
+    this.treeVersions.set(root, (this.treeVersions.get(root) ?? 0) + 1);
   }
 
   header(): Header {
@@ -369,7 +392,7 @@ export class Pager {
     for (const id of this.dirty) this.cache.delete(id);
     this.dirty.clear();
     this.txn = false;
-    this.modCount++;
+    this.epoch++;
   }
 
   commit(): void {

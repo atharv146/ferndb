@@ -57,7 +57,12 @@ import {
 
 export interface PlannerContext extends TreeProvider {
   catalog: Catalog;
+  /** Current number of rows in a table (kept up to date by the database). */
+  rowCount(t: TableInfo): number;
 }
+
+/** Rough row estimate for derived tables, whose size we don't track. */
+const UNKNOWN_ROWS = 1000;
 
 export interface PlannedSelect {
   plan: PlanNode;
@@ -75,6 +80,8 @@ interface Planned {
   plan: PlanNode;
   scope: Scope;
   aliases: Set<string>;
+  /** Estimated number of output rows. */
+  est: number;
   /** Present when the item is a plain table: what an index nested-loop join needs. */
   base?: { table: TableInfo; alias: string; conj: Expr[]; point: boolean };
 }
@@ -468,7 +475,7 @@ export class Planner {
         const scope = this.newScope(tableSchema(t, alias), outer);
         const mine = take(pending, (c) => c.tables !== null && c.tables.size > 0 && subset(c.tables, new Set([alias]))).map((c) => c.expr);
         const access = this.accessPath(t, alias, scope, mine, hint);
-        return { plan: access.plan, scope, aliases: new Set([alias]), base: { table: t, alias, conj: mine, point: access.point }, ordered: access.ordered };
+        return { plan: access.plan, scope, aliases: new Set([alias]), est: access.est, base: { table: t, alias, conj: mine, point: access.point }, ordered: access.ordered };
       }
       case 'subquery': {
         const r = this.plannedSubquery(item, outer);
@@ -478,7 +485,7 @@ export class Planner {
         let plan: PlanNode = new SubqueryScan(cols, r.plan, alias);
         const mine = take(pending, (c) => c.tables !== null && c.tables.size > 0 && subset(c.tables, new Set([alias]))).map((c) => c.expr);
         if (mine.length > 0) plan = new Filter(plan, this.compileAll(mine, scope, 'WHERE')!, exprToSql(joinAnd(mine)!));
-        return { plan, scope, aliases: new Set([alias]) };
+        return { plan, scope, aliases: new Set([alias]), est: UNKNOWN_ROWS * 0.5 ** mine.length };
       }
       case 'join':
         return this.planJoin(item, pending, outer, level);
@@ -538,7 +545,11 @@ export class Planner {
       else if (subset(lt, right.aliases) && subset(rt, left.aliases)) equi.push({ conj: c, l: e.right, r: e.left });
     }
 
+    const joinEst = equi.length > 0 ? Math.max(left.est, right.est) : Math.max(1, left.est * right.est * 0.25);
+
     // 1) Index nested-loop join: probe the inner table by key for each outer row.
+    //    Worth it when there are few outer rows compared with the work of
+    //    building a hash table over the inner side.
     if (right.base && !right.base.point && equi.length > 0) {
       const { table, alias, conj } = right.base;
       let best: { path: AccessPath; used: typeof equi } | null = null;
@@ -553,7 +564,10 @@ export class Planner {
         const better = !best || used.length > best.used.length || (used.length === best.used.length && path.kind === 'pk' && best.path.kind !== 'pk');
         if (better) best = { path, used };
       }
-      if (best) {
+      const innerRows = this.ctx.rowCount(right.base.table);
+      const probeCost = best ? left.est * (best.path.kind === 'pk' ? 3 : 6) : Infinity;
+      const hashCost = Math.min(innerRows, right.est * 3) + left.est;
+      if (best && probeCost <= hashCost) {
         const leftScopeForKeys = left.scope;
         const range: KeyRange = {
           eq: best.used.map((q, i) => checkKeyType(this.compile(q.l, leftScopeForKeys, 'ON'), table, best!.path.columns[i]!)),
@@ -573,7 +587,8 @@ export class Planner {
           },
           leftJoin, this.ctx,
         );
-        return { plan, scope, aliases };
+        plan.details.push(`est. cost: probe ${Math.round(probeCost)} vs hash ${Math.round(hashCost)}`);
+        return { plan, scope, aliases, est: joinEst };
       }
     }
 
@@ -591,13 +606,13 @@ export class Planner {
         },
         leftJoin,
       );
-      return { plan, scope, aliases };
+      return { plan, scope, aliases, est: joinEst };
     }
 
     // 3) Nested loop with an arbitrary condition (or a cross join).
     const conds = joinConj.map((c) => c.expr);
     const plan = new NestedLoopJoin(left.plan, right.plan, this.compileAll(conds, scope, 'ON'), conds.length ? exprToSql(joinAnd(conds)!) : '', leftJoin);
-    return { plan, scope, aliases };
+    return { plan, scope, aliases, est: joinEst };
   }
 
   // --------------------------------------------------------- access paths
@@ -635,7 +650,7 @@ export class Planner {
     return out;
   }
 
-  private accessPath(t: TableInfo, alias: string, scope: Scope, conj: Expr[], hint: OrderHint | null): { plan: PlanNode; ordered: boolean; point: boolean } {
+  private accessPath(t: TableInfo, alias: string, scope: Scope, conj: Expr[], hint: OrderHint | null): { plan: PlanNode; ordered: boolean; point: boolean; est: number } {
     const sargs = this.sargs(conj, scope);
     const k = this.cctx('WHERE');
     const cs = this.constScope(scope.outer);
@@ -723,7 +738,18 @@ export class Planner {
     }
     const rest = conj.filter((e) => !best?.used.has(e));
     if (rest.length > 0) plan = new Filter(plan, this.compileAll(rest, scope, 'WHERE')!, exprToSql(joinAnd(rest)!));
-    return { plan, ordered, point: best?.point ?? false };
+
+    // Textbook selectivity guesses: equality 10%, a closed range 10%, an open range 30%, other filters 50%.
+    const rows = this.ctx.rowCount(t);
+    let est = rows;
+    if (best?.point) est = 1;
+    else if (best && best.used.size > 0) {
+      const r = best.range;
+      est = rows * 0.1 ** (r.eq.length + (r.eqIn ? 1 : 0)) * (r.eqIn ? r.eqIn.length : 1);
+      if (r.lo || r.hi) est *= r.lo && r.hi ? 0.1 : 0.3;
+    }
+    est = Math.max(1, Math.ceil(est * 0.5 ** rest.length));
+    return { plan, ordered, point: best?.point ?? false, est };
   }
 
   /** Plan producing full rows (including rowid) of `t` matching `where`; used by UPDATE and DELETE. */

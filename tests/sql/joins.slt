@@ -12,8 +12,8 @@ INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty')
 statement ok
 INSERT INTO emp VALUES (1, 'ann', 1, NULL, 200), (2, 'bob', 1, 1, 150), (3, 'cat', 2, 1, 120), (4, 'dan', NULL, 3, 90), (5, 'eve', 2, 3, 130)
 
-# emp -> dept probes dept by primary key: index nested loop join
-plan Index Nested Loop Join
+# with tables this small, building a hash table is cheaper than probing
+plan Hash Join
 SELECT e.name, d.name FROM emp e JOIN dept d ON d.id = e.dept_id
 
 query rowsort
@@ -24,9 +24,44 @@ bob | eng
 cat | ops
 eve | ops
 
-# dept -> emp has no index on emp.dept_id: hash join
+# a large inner table with a key on the join column: index nested loop join
+statement ok
+CREATE TABLE digits (d INTEGER)
+
+statement ok
+INSERT INTO digits VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+
+statement ok
+CREATE TABLE nums (n INTEGER PRIMARY KEY, sq INTEGER, parity TEXT)
+
+statement ok
+INSERT INTO nums SELECT a.d * 100 + b.d * 10 + c.d, (a.d * 100 + b.d * 10 + c.d) * (a.d * 100 + b.d * 10 + c.d), CASE WHEN c.d % 2 = 0 THEN 'even' ELSE 'odd' END FROM digits a, digits b, digits c
+
+plan Index Nested Loop Join
+SELECT e.name, n.sq FROM emp e JOIN nums n ON n.n = e.salary
+
+query rowsort
+SELECT e.name, n.sq FROM emp e JOIN nums n ON n.n = e.salary
+----
+ann | 40000
+bob | 22500
+cat | 14400
+dan | 8100
+eve | 16900
+
+query
+SELECT count(*), sum(sq) FROM nums
+----
+1000 | 332833500
+
+# a large outer side makes probing more expensive than hashing
 plan Hash Join
-SELECT d.name, e.name FROM dept d JOIN emp e ON e.dept_id = d.id
+SELECT count(*) FROM nums a JOIN nums b ON b.n = a.sq
+
+query
+SELECT count(*) FROM nums a JOIN nums b ON b.n = a.sq
+----
+32
 
 query rowsort
 SELECT d.name, e.name FROM dept d JOIN emp e ON e.dept_id = d.id
@@ -142,8 +177,24 @@ ops | 2 | cat
 statement ok
 CREATE INDEX emp_dept ON emp (dept_id)
 
+statement ok
+CREATE INDEX nums_parity ON nums (parity)
+
 plan Index Nested Loop Left Join
-SELECT d.name, e.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id
+SELECT d.name, n.n FROM dept d LEFT JOIN nums n ON n.parity = d.name AND n.n < 5
+
+query rowsort
+SELECT e.name, n.n FROM emp e LEFT JOIN nums n ON n.parity = CASE WHEN e.id % 2 = 0 THEN 'even' END AND n.n < 5
+----
+ann | NULL
+bob | 0
+bob | 2
+bob | 4
+cat | NULL
+dan | 0
+dan | 2
+dan | 4
+eve | NULL
 
 query rowsort
 SELECT d.name, e.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id AND e.salary > 140

@@ -38,12 +38,15 @@ export interface LeafNode {
   keys: Uint8Array[];
   vals: Payload[];
   next: number;
+  /** Encoded size in bytes, maintained incrementally (see nodeSize for the definition). */
+  size: number;
 }
 
 export interface InternalNode {
   kind: 'internal';
   keys: Uint8Array[];
   children: number[];
+  size: number;
 }
 
 export type BTreeNode = LeafNode | InternalNode;
@@ -60,7 +63,8 @@ function internalCellSize(key: Uint8Array): number {
   return 6 + key.length;
 }
 
-export function nodeSize(n: BTreeNode): number {
+/** Encoded size computed from scratch; nodes cache it in `size`. */
+export function nodeSize(n: { kind: 'leaf'; keys: Uint8Array[]; vals: Payload[] } | { kind: 'internal'; keys: Uint8Array[] }): number {
   let size = NODE_HEADER;
   if (n.kind === 'leaf') {
     for (let i = 0; i < n.keys.length; i++) size += leafCellSize(n.keys[i]!, n.vals[i]!);
@@ -87,7 +91,7 @@ export const NodeCodec: PageCodec<BTreeNode> = {
           vals[i] = { length, page: r.u32() };
         }
       }
-      return { kind: 'leaf', keys, vals, next };
+      return { kind: 'leaf', keys, vals, next, size: r.pos };
     }
     if (kind === KIND_INTERNAL) {
       const children: number[] = [r.u32()];
@@ -96,7 +100,7 @@ export const NodeCodec: PageCodec<BTreeNode> = {
         keys[i] = r.bytes(r.u16());
         children.push(r.u32());
       }
-      return { kind: 'internal', keys, children };
+      return { kind: 'internal', keys, children, size: r.pos };
     }
     throw new DbError('CORRUPT', `unexpected page kind ${kind} where a B+ tree node was expected`);
   },
@@ -223,7 +227,7 @@ export class BTree {
   /** Allocates an empty tree and returns its (permanent) root page id. */
   static create(pager: Pager): number {
     const id = pager.allocate();
-    pager.put<BTreeNode>(id, { kind: 'leaf', keys: [], vals: [], next: 0 }, NodeCodec);
+    pager.put<BTreeNode>(id, { kind: 'leaf', keys: [], vals: [], next: 0, size: NODE_HEADER }, NodeCodec);
     return id;
   }
 
@@ -232,7 +236,13 @@ export class BTree {
   }
 
   private nodeMut(id: number): BTreeNode {
+    this.pager.bumpTree(this.root);
     return this.pager.getMut(id, NodeCodec);
+  }
+
+  private putNode(id: number, node: BTreeNode): void {
+    this.pager.bumpTree(this.root);
+    this.pager.put(id, node, NodeCodec);
   }
 
   // ---------------------------------------------------------------- payloads
@@ -313,14 +323,16 @@ export class BTree {
       const m = this.nodeMut(id) as LeafNode;
       const payload = this.makePayload(key, value);
       if (exists) {
+        m.size += leafCellSize(key, payload) - leafCellSize(key, m.vals[i]!);
         this.freePayload(m.vals[i]!);
         m.vals[i] = payload;
       } else {
         m.keys.splice(i, 0, key);
         m.vals.splice(i, 0, payload);
+        m.size += leafCellSize(key, payload);
       }
       const appended = !exists && m.next === 0 && i === m.keys.length - 1;
-      return { inserted: !exists, split: nodeSize(m) > this.pageSize ? this.splitLeaf(m, appended) : null };
+      return { inserted: !exists, split: m.size > this.pageSize ? this.splitLeaf(m, appended) : null };
     }
     const ci = upperBound(node.keys, key);
     const r = this.insertRec(node.children[ci]!, key, value, upsert);
@@ -328,7 +340,8 @@ export class BTree {
     const m = this.nodeMut(id) as InternalNode;
     m.keys.splice(ci, 0, r.split.key);
     m.children.splice(ci + 1, 0, r.split.right);
-    return { inserted: r.inserted, split: nodeSize(m) > this.pageSize ? this.splitInternal(m) : null };
+    m.size += internalCellSize(r.split.key);
+    return { inserted: r.inserted, split: m.size > this.pageSize ? this.splitInternal(m) : null };
   }
 
   /** Index at which the cumulative cell size first reaches half the total. */
@@ -350,9 +363,11 @@ export class BTree {
     const sizes = m.keys.map((k, i) => leafCellSize(k, m.vals[i]!));
     const s = appended ? m.keys.length - 1 : this.splitPoint(sizes, 1, m.keys.length - 1);
     const rightId = this.pager.allocate();
-    const right: LeafNode = { kind: 'leaf', keys: m.keys.splice(s), vals: m.vals.splice(s), next: m.next };
+    const right: LeafNode = { kind: 'leaf', keys: m.keys.splice(s), vals: m.vals.splice(s), next: m.next, size: 0 };
+    right.size = nodeSize(right);
+    m.size -= right.size - NODE_HEADER;
     m.next = rightId;
-    this.pager.put<BTreeNode>(rightId, right, NodeCodec);
+    this.putNode(rightId, right);
     return { key: right.keys[0]!, right: rightId };
   }
 
@@ -361,9 +376,11 @@ export class BTree {
     const s = this.splitPoint(sizes, 1, m.keys.length - 2);
     const rightKeys = m.keys.splice(s);
     const sep = rightKeys.shift()!;
-    const right: InternalNode = { kind: 'internal', keys: rightKeys, children: m.children.splice(s + 1) };
+    const right: InternalNode = { kind: 'internal', keys: rightKeys, children: m.children.splice(s + 1), size: 0 };
+    right.size = nodeSize(right);
+    m.size = nodeSize(m);
     const rightId = this.pager.allocate();
-    this.pager.put<BTreeNode>(rightId, right, NodeCodec);
+    this.putNode(rightId, right);
     return { key: sep, right: rightId };
   }
 
@@ -371,8 +388,8 @@ export class BTree {
   private growRoot(split: Split): void {
     const old = this.node(this.root);
     const leftId = this.pager.allocate();
-    this.pager.put(leftId, old, NodeCodec);
-    this.pager.put<BTreeNode>(this.root, { kind: 'internal', keys: [split.key], children: [leftId, split.right] }, NodeCodec);
+    this.putNode(leftId, old);
+    this.putNode(this.root, { kind: 'internal', keys: [split.key], children: [leftId, split.right], size: NODE_HEADER + internalCellSize(split.key) });
   }
 
   // ------------------------------------------------------------------ delete
@@ -383,7 +400,7 @@ export class BTree {
       const r = this.node(this.root);
       if (r.kind === 'internal' && r.keys.length === 0) {
         const childId = r.children[0]!;
-        this.pager.put(this.root, this.node(childId), NodeCodec);
+        this.putNode(this.root, this.node(childId));
         this.pager.free(childId);
       }
     }
@@ -396,6 +413,7 @@ export class BTree {
       const i = lowerBound(node.keys, key);
       if (i >= node.keys.length || compareBytes(node.keys[i]!, key) !== 0) return false;
       const m = this.nodeMut(id) as LeafNode;
+      m.size -= leafCellSize(m.keys[i]!, m.vals[i]!);
       this.freePayload(m.vals[i]!);
       m.keys.splice(i, 1);
       m.vals.splice(i, 1);
@@ -411,7 +429,7 @@ export class BTree {
   private rebalance(parentId: number, ci: number): void {
     const parent = this.node(parentId) as InternalNode;
     const child = this.node(parent.children[ci]!);
-    if (nodeSize(child) >= this.pageSize / 4 || parent.children.length < 2) return;
+    if (child.size >= this.pageSize / 4 || parent.children.length < 2) return;
     const li = ci > 0 ? ci - 1 : ci;
     const leftId = parent.children[li]!;
     const rightId = parent.children[li + 1]!;
@@ -420,8 +438,8 @@ export class BTree {
     const right = this.node(rightId);
     const merged =
       left.kind === 'leaf'
-        ? nodeSize(left) + nodeSize(right) - NODE_HEADER
-        : nodeSize(left) + nodeSize(right) - NODE_HEADER + 6 + sep.length;
+        ? left.size + right.size - NODE_HEADER
+        : left.size + right.size - NODE_HEADER + internalCellSize(sep);
     if (merged > this.pageSize) return;
 
     const L = this.nodeMut(leftId);
@@ -435,10 +453,12 @@ export class BTree {
       L.keys.push(sep, ...R.keys);
       L.children.push(...R.children);
     }
+    L.size = merged;
     this.pager.free(rightId);
     const P = this.nodeMut(parentId) as InternalNode;
     P.keys.splice(li, 1);
     P.children.splice(li + 1, 1);
+    P.size -= internalCellSize(sep);
   }
 
   // ------------------------------------------------------------------- scans
@@ -530,13 +550,14 @@ export class BTree {
     const loEx = range.loExclusive ?? false;
     const hiEx = range.hiExclusive ?? false;
     let stack = reverse ? this.seekLast(hi, hiEx) : this.seekFirst(lo, loEx);
-    let mod = this.pager.modCount;
+    let mod = this.pager.treeVersion(this.root);
     let last: Uint8Array | null = null;
     for (;;) {
-      if (this.pager.modCount !== mod) {
+      const now = this.pager.treeVersion(this.root);
+      if (now !== mod) {
         // The tree changed while we were suspended: re-seek past the last key.
         if (last !== null) stack = reverse ? this.seekLast(last, true) : this.seekFirst(last, true);
-        mod = this.pager.modCount;
+        mod = now;
       }
       const top = stack[stack.length - 1]!;
       const leaf = top.node as LeafNode;
@@ -594,6 +615,7 @@ export class BTree {
       else for (const c of n.children) visit(c);
       this.pager.free(id);
     };
+    this.pager.bumpTree(this.root);
     visit(this.root);
   }
 
@@ -605,7 +627,7 @@ export class BTree {
       for (const c of n.children) {
         new BTree(this.pager, c).destroy();
       }
-    this.pager.put<BTreeNode>(this.root, { kind: 'leaf', keys: [], vals: [], next: 0 }, NodeCodec);
+    this.putNode(this.root, { kind: 'leaf', keys: [], vals: [], next: 0, size: NODE_HEADER });
   }
 
   // ----------------------------------------------------------- introspection
@@ -627,7 +649,7 @@ export class BTree {
           keys: n.keys.slice(),
           children: n.kind === 'internal' ? n.children.slice() : [],
           next: n.kind === 'leaf' ? n.next : 0,
-          bytes: nodeSize(n),
+          bytes: n.size,
           overflowCells: n.kind === 'leaf' ? n.vals.filter((v) => !(v instanceof Uint8Array)).length : 0,
         });
         if (n.kind === 'internal') next.push(...n.children);
@@ -648,6 +670,7 @@ export class BTree {
       pages++;
       const n = this.node(id);
       const size = nodeSize(n);
+      if (size !== n.size) throw new Error(`node ${id}: cached size ${n.size} but actual ${size}`);
       if (size > this.pageSize) throw new Error(`node ${id} is ${size} bytes`);
       for (let i = 0; i < n.keys.length; i++) {
         const k = n.keys[i]!;
